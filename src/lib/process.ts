@@ -19,9 +19,9 @@ export function execFileText(
       ? { maxBufferBytes: optionsOrMaxBuffer }
       : optionsOrMaxBuffer;
   return new Promise((resolve, reject) => {
-    let invocation: ReturnType<typeof commandInvocation>;
+    let invocation: ReturnType<typeof shimInvocation>;
     try {
-      invocation = commandInvocation(command, args, options.env);
+      invocation = shimInvocation(command, args, options.env);
     } catch (error) {
       reject(error);
       return;
@@ -51,7 +51,7 @@ export function execFileText(
   });
 }
 
-export function commandInvocation(
+function shimInvocation(
   command: string,
   args: string[],
   childEnvironment?: NodeJS.ProcessEnv,

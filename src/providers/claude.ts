@@ -222,11 +222,23 @@ const SELECTED_LANE: ClaudeLane = { envEligible: true };
  * read-only. Its Keychain value is read only under the same per-item grant
  * marker or `--allow-keychain-prompt` as today.
  */
-async function discoverClaudeAccounts(): Promise<
+async function discoverClaudeAccounts(
+  options: ProviderOptions,
+  operation: "quota" | "auth",
+): Promise<
   ProviderAccount[] | undefined
 > {
   if (claudeSwapEnabled()) {
-    return (await readClaudeSwapAccounts()).map(
+    if (operation === "auth") return undefined;
+    if (!options.refreshCredentials)
+      return [claudeSwapUnavailableAccount("claude_swap_refresh_disabled")];
+    let accounts: ClaudeSwapAccount[];
+    try {
+      accounts = await readClaudeSwapAccounts();
+    } catch (error) {
+      return [claudeSwapUnavailableAccount(claudeSwapReadError(error))];
+    }
+    return accounts.map(
       (account): ProviderAccount => ({
         accountKey: account.accountKey,
         fetchQuota: async () => claudeSwapQuota(account),
@@ -297,8 +309,8 @@ async function discoverClaudeAccounts(): Promise<
 
 /**
  * One claude-swap account's reading. `pct` is claude-swap's copy of the
- * Anthropic usage endpoint's `utilization` (and a scoped limit's `percent`),
- * so it maps through the same normalizers as a native read. claude-swap
+ * Anthropic usage endpoint's `utilization`, so it maps through the same
+ * normalizers as a native read. claude-swap
  * measured it at `usageFetchedAt`, so a window whose reset has passed since
  * is dropped like a stale one. No identity is verified here, so a lane never
  * coalesces with another.
@@ -315,7 +327,6 @@ function claudeSwapQuota(account: ClaudeSwapAccount): ProviderQuota {
       const data = objectValue(raw);
       return data && { utilization: data.pct, resets_at: data.resetsAt };
     };
-    const scoped = Array.isArray(usage.scoped) ? usage.scoped : [];
     const reading = successProvider({
       provider: "claude",
       label: "Claude",
@@ -329,18 +340,6 @@ function claudeSwapQuota(account: ClaudeSwapAccount): ProviderQuota {
           "session",
         ),
         normalizeWindow(window(usage.sevenDay), "seven_day", "week", "weekly"),
-        ...scoped.map((raw) => {
-          const data = objectValue(raw);
-          const name = stringValue(data?.name);
-          return (
-            name &&
-            normalizeScopedLimitEntry({
-              percent: data?.pct,
-              resets_at: data?.resetsAt,
-              scope: { model: { display_name: name } },
-            })
-          );
-        }),
       ].filter((window): window is QuotaWindow => Boolean(window)),
       refreshedAt: account.fetchedAt,
       sourcesTried: [CLAUDE_SWAP_SOURCE],
@@ -361,6 +360,31 @@ function claudeSwapQuota(account: ClaudeSwapAccount): ProviderQuota {
     }),
     account: identity,
   };
+}
+
+function claudeSwapUnavailableAccount(error: string): ProviderAccount {
+  return {
+    accountKey: "claude-swap:unavailable",
+    fetchQuota: async () =>
+      failedProvider({
+        provider: "claude",
+        label: "Claude",
+        status: "unavailable",
+        error,
+        sourcesTried: [CLAUDE_SWAP_SOURCE],
+        attempts: [{ source: CLAUDE_SWAP_SOURCE, status: "failed", error }],
+      }),
+    inspectAuth: async () => ({ provider: "claude", sources: [] }),
+  };
+}
+
+function claudeSwapReadError(error: unknown): string {
+  const value = error instanceof Error ? error.message : "";
+  return /^claude_swap_(?:unavailable|timed_out|output_too_large|spawn_failed|exit_status|malformed)$/.test(
+    value,
+  )
+    ? value
+    : "claude_swap_malformed";
 }
 
 /** claude-swap's own `usageStatus`, or `usage_unavailable` for an unusable `ok`. */

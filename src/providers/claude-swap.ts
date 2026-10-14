@@ -1,6 +1,6 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { findCommandPath } from "../lib/process.js";
+import { commandInvocation, findCommandPath } from "../lib/process.js";
 
 /**
  * Opt-in: report one Claude lane per account claude-swap manages, read from
@@ -22,7 +22,7 @@ export type ClaudeSwapAccount = {
   organization?: string;
   /** claude-swap's own `usageStatus`; only `ok` carries `usage`. */
   usageStatus: string;
-  /** The `usage` object as printed: `fiveHour`, `sevenDay`, `scoped`. */
+  /** The `usage` object as printed. */
   usage?: Record<string, unknown>;
   /** When claude-swap measured `usage`. */
   fetchedAt?: string;
@@ -35,15 +35,14 @@ export function claudeSwapEnabled(env = process.env): boolean {
 
 /**
  * The accounts `cswap list --json` (schema 1) reports, in its order. Throws
- * when the command is missing, fails, or prints anything but schema 1, so
- * the collector falls back to Claude's single selected lane. A row without an
- * email cannot be keyed and is left out.
+ * when the command is missing, fails, or prints anything but schema 1 with at
+ * least one keyable account. A row without an email cannot be keyed.
  */
 export async function readClaudeSwapAccounts(): Promise<ClaudeSwapAccount[]> {
   const payload = objectValue(JSON.parse(await runCswapList()));
   if (payload?.schemaVersion !== 1 || !Array.isArray(payload.accounts))
     throw new Error("claude_swap_malformed");
-  return payload.accounts.flatMap((raw): ClaudeSwapAccount[] => {
+  const accounts = payload.accounts.flatMap((raw): ClaudeSwapAccount[] => {
     const row = objectValue(raw);
     const email = stringValue(row?.email);
     if (!row || !email) return [];
@@ -62,6 +61,8 @@ export async function readClaudeSwapAccounts(): Promise<ClaudeSwapAccount[]> {
       },
     ];
   });
+  if (accounts.length === 0) throw new Error("claude_swap_malformed");
+  return accounts;
 }
 
 /**
@@ -74,25 +75,47 @@ async function runCswapList(): Promise<string> {
   const executable = await findCommandPath(COMMAND);
   if (!executable) throw new Error("claude_swap_unavailable");
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, [...ARGS], {
-      stdio: ["ignore", "pipe", "ignore"],
-      detached: true,
-    });
+    let invocation: ReturnType<typeof commandInvocation>;
+    try {
+      invocation = commandInvocation(executable, [...ARGS]);
+    } catch {
+      reject(new Error("claude_swap_spawn_failed"));
+      return;
+    }
+    let child: ChildProcess;
+    try {
+      child = spawn(invocation.command, invocation.args, {
+        stdio: ["ignore", "pipe", "ignore"],
+        detached: true,
+        ...(invocation.environment ? { env: invocation.environment } : {}),
+      });
+    } catch {
+      reject(new Error("claude_swap_spawn_failed"));
+      return;
+    }
     let output = "";
+    let settled = false;
     const walkAway = (error: string) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      child.stdout?.destroy();
+      output = "";
+      child.stdout?.removeAllListeners("data");
+      child.stdout?.resume();
       child.unref();
       reject(new Error(error));
     };
     const timer = setTimeout(() => walkAway("claude_swap_timed_out"), WAIT_MS);
     child.stdout?.setEncoding("utf8").on("data", (chunk: string) => {
+      if (settled) return;
       output += chunk;
       if (output.length > OUTPUT_LIMIT_CHARS)
         walkAway("claude_swap_output_too_large");
     });
     child.on("error", () => walkAway("claude_swap_spawn_failed"));
     child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       if (code === 0) resolve(output);
       else reject(new Error("claude_swap_exit_status"));

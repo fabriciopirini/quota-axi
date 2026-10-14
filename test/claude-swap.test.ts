@@ -89,6 +89,27 @@ function cswap(stdout: string, code = 0): void {
   chmodSync(file, 0o755);
 }
 
+function oversizedCswap(done: string): void {
+  const file = join(home, "bin", "cswap");
+  mkdirSync(join(home, "bin"), { recursive: true });
+  writeFileSync(
+    file,
+    [
+      `#!${process.execPath}`,
+      `const { writeFileSync } = require("node:fs");`,
+      `process.stdout.write(Buffer.alloc(1_100_000, "x"), () => writeFileSync(${JSON.stringify(done)}, "done"));`,
+    ].join("\n"),
+  );
+  chmodSync(file, 0o755);
+}
+
+async function waitForFile(file: string): Promise<void> {
+  for (let attempt = 0; attempt < 200 && !existsSync(file); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  expect(existsSync(file)).toBe(true);
+}
+
 /** claude-swap's schema 1, shaped as observed from claude-swap 0.26. */
 function list(accounts: unknown[] = [personal(), team()]): string {
   return JSON.stringify({ schemaVersion: 1, activeAccountNumber: 1, accounts });
@@ -134,7 +155,7 @@ async function quota(args: string[] = ["--json"]): Promise<QuotaReport> {
   const { quotaCommand } = await import("../src/commands.js");
   return JSON.parse(
     await quotaCommand(
-      ["--provider", "claude", "--no-credential-refresh", ...args],
+      ["--provider", "claude", ...args],
       undefined,
     ),
   ) as QuotaReport;
@@ -172,7 +193,7 @@ describe.skipIf(process.platform === "win32")("claude-swap lanes", () => {
     expect(report.schemaVersion).toBe(6);
     expect(report.providers.map(remaining)).toEqual([
       ["five_hour=91", "seven_day=7"],
-      ["five_hour=63", "seven_day=59", "model:fable=88"],
+      ["five_hour=63", "seven_day=59"],
     ]);
     expect(report.providers[0].windows[0].resetsAt).toBe(
       "2026-10-14T18:00:00.431135+00:00",
@@ -231,19 +252,56 @@ describe.skipIf(process.platform === "win32")("claude-swap lanes", () => {
     ]);
   });
 
+  it("does not run cswap for auth or refresh-disabled quota", async () => {
+    cswap(list());
+    vi.stubEnv("QUOTA_AXI_CLAUDE_SWAP", "1");
+    const { authCommand } = await import("../src/commands.js");
+
+    const auth = JSON.parse(
+      await authCommand(["--provider", "claude", "--json"], undefined),
+    ) as { auth: Array<{ sources: Array<{ source: string }> }> };
+    expect(auth.auth[0].sources.some((source) => source.source === "claude-swap")).toBe(false);
+    expect(existsSync(ran)).toBe(false);
+
+    const report = await quota(["--no-credential-refresh", "--json"]);
+    expect(report.providers[0]).toMatchObject({
+      windows: [],
+      state: { status: "unavailable", error: "claude_swap_refresh_disabled" },
+    });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(existsSync(ran)).toBe(false);
+  });
+
+  it("keeps draining output after walking away from an oversized response", async () => {
+    const done = join(home, "cswap-finished");
+    oversizedCswap(done);
+    vi.stubEnv("QUOTA_AXI_CLAUDE_SWAP", "1");
+
+    const report = await quota();
+    expect(report.providers[0].state.error).toBe(
+      "claude_swap_output_too_large",
+    );
+    await waitForFile(done);
+  });
+
   it.each([
-    ["is not installed", undefined],
-    ["exits nonzero", () => cswap(list(), 1)],
-    ["prints malformed JSON", () => cswap("{not json")],
-    ["prints another schema", () => cswap('{"schemaVersion":2,"accounts":[]}')],
-    ["lists no account", () => cswap(list([]))],
-    ["lists no keyable account", () => cswap(list([{ usageStatus: "ok" }]))],
+    ["is not installed", undefined, "claude_swap_unavailable"],
+    ["exits nonzero", () => cswap(list(), 1), "claude_swap_exit_status"],
+    ["prints malformed JSON", () => cswap("{not json"), "claude_swap_malformed"],
+    ["prints another schema", () => cswap('{"schemaVersion":2,"accounts":[]}'), "claude_swap_malformed"],
+    ["lists no account", () => cswap(list([])), "claude_swap_malformed"],
+    ["lists no keyable account", () => cswap(list([{ usageStatus: "ok" }])), "claude_swap_malformed"],
   ])(
-    "falls back to the native selected lane when cswap %s",
-    async (_case, install) => {
+    "reports unavailable without native fallback when cswap %s",
+    async (_case, install, error) => {
       install?.();
       vi.stubEnv("QUOTA_AXI_CLAUDE_SWAP", "1");
-      expectNativeLane(await quota());
+      const report = await quota();
+      expect(report.providers[0]).toMatchObject({
+        windows: [],
+        state: { status: "unavailable", error },
+      });
+      expect(fetch).not.toHaveBeenCalled();
     },
   );
 });

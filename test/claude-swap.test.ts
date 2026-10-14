@@ -64,6 +64,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.doUnmock("../src/lib/process.js");
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
   vi.useRealTimers();
@@ -436,6 +437,38 @@ describe.skipIf(process.platform === "win32")("claude-swap lanes", () => {
       expect(report.providers[0]).toMatchObject({
         windows: [],
         state: { status: "unavailable", error },
+      });
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe("claude-swap launcher boundary", () => {
+  it.each([".cmd", ".bat"])(
+    "rejects a Windows %s launcher without spawning it",
+    async (extension) => {
+      vi.doMock("../src/lib/process.js", async () => {
+        const actual = await vi.importActual<
+          typeof import("../src/lib/process.js")
+        >("../src/lib/process.js");
+        return {
+          ...actual,
+          findCommandPath: async (command: string) =>
+            command === "cswap"
+              ? `C:\\tools\\cswap${extension}`
+              : actual.findCommandPath(command),
+        };
+      });
+      vi.stubEnv("QUOTA_AXI_CLAUDE_SWAP", "1");
+
+      const report = await quota();
+      expect(report.providers[0]).toMatchObject({
+        windows: [],
+        state: {
+          status: "unavailable",
+          error: "claude_swap_unavailable",
+          remedyCommand: "pipx install claude-swap",
+        },
       });
       expect(fetch).not.toHaveBeenCalled();
     },

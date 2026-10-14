@@ -31,6 +31,7 @@ import {
   type ClaudeProfile,
 } from "./claude-accounts.js";
 import {
+  CLAUDE_SWAP_EXECUTABLE_REMEDY,
   CLAUDE_SWAP_SOURCE,
   claudeSwapEnabled,
   readClaudeSwapAccounts,
@@ -234,7 +235,15 @@ async function discoverClaudeAccounts(
     try {
       accounts = await readClaudeSwapAccounts();
     } catch (error) {
-      return [claudeSwapUnavailableAccount(claudeSwapReadError(error))];
+      return [
+        claudeSwapUnavailableAccount(
+          claudeSwapReadError(error),
+          error instanceof Error &&
+            error.cause === CLAUDE_SWAP_EXECUTABLE_REMEDY
+            ? CLAUDE_SWAP_EXECUTABLE_REMEDY
+            : undefined,
+        ),
+      ];
     }
     return accounts.map(
       (account): ProviderAccount => ({
@@ -358,18 +367,28 @@ function claudeSwapQuota(account: ClaudeSwapAccount): ProviderQuota {
   };
 }
 
-function claudeSwapUnavailableAccount(error: string): ProviderAccount {
+function claudeSwapUnavailableAccount(
+  error: string,
+  remedyCommand?: string,
+): ProviderAccount {
   return {
     accountKey: "claude-swap:unavailable",
-    fetchQuota: async () =>
-      failedProvider({
+    fetchQuota: async () => {
+      const failure = failedProvider({
         provider: "claude",
         label: "Claude",
         status: "unavailable",
         error,
         sourcesTried: [CLAUDE_SWAP_SOURCE],
         attempts: [{ source: CLAUDE_SWAP_SOURCE, status: "failed", error }],
-      }),
+      });
+      return remedyCommand
+        ? {
+            ...failure,
+            state: { ...failure.state, remedyCommand },
+          }
+        : failure;
+    },
     inspectAuth: async () => ({ provider: "claude", sources: [] }),
   };
 }

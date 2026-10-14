@@ -3,8 +3,8 @@ import { createHash } from "node:crypto";
 import { closeSync, openSync } from "node:fs";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { commandInvocation, findCommandPath } from "../lib/process.js";
+import { join, win32 } from "node:path";
+import { findCommandPath } from "../lib/process.js";
 
 /**
  * Opt-in: report one Claude lane per account claude-swap manages, read from
@@ -19,6 +19,7 @@ const ARGS = ["list", "--json"] as const;
 /** claude-swap 0.26 bounds each usage fetch at 5s and a token refresh at 10s. */
 const WAIT_MS = 30_000;
 const OUTPUT_LIMIT_BYTES = 1_048_576;
+export const CLAUDE_SWAP_EXECUTABLE_REMEDY = "pipx install claude-swap";
 const CHILD_ENVIRONMENT_KEYS = new Set([
   "HOME",
   "PATH",
@@ -119,14 +120,15 @@ export async function readClaudeSwapAccounts(): Promise<ClaudeSwapAccount[]> {
  */
 async function runCswapList(): Promise<string> {
   const executable = await findCommandPath(COMMAND);
-  if (!executable) throw new Error("claude_swap_unavailable");
+  if (
+    !executable ||
+    [".cmd", ".bat"].includes(win32.extname(executable).toLowerCase())
+  )
+    throw new Error("claude_swap_unavailable", {
+      cause:
+        executable === undefined ? undefined : CLAUDE_SWAP_EXECUTABLE_REMEDY,
+    });
   const childEnvironment = claudeSwapEnvironment();
-  let invocation: ReturnType<typeof commandInvocation>;
-  try {
-    invocation = commandInvocation(executable, [...ARGS], childEnvironment);
-  } catch {
-    throw new Error("claude_swap_spawn_failed");
-  }
   let outputDirectory: string;
   try {
     outputDirectory = await mkdtemp(join(tmpdir(), "quota-axi-cswap-"));
@@ -143,10 +145,10 @@ async function runCswapList(): Promise<string> {
   }
   let child: ChildProcess;
   try {
-    child = spawn(invocation.command, invocation.args, {
+    child = spawn(executable, [...ARGS], {
       stdio: ["ignore", outputFd, "ignore"],
       detached: true,
-      env: invocation.environment ?? childEnvironment,
+      env: childEnvironment,
     });
   } catch {
     closeSync(outputFd);

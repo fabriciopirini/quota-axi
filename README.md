@@ -499,7 +499,7 @@ QUOTA_AXI_CLAUDE_PROFILES="$HOME/.claude-work:$HOME/.claude-team" quota-axi --pr
 
 ### claude-swap accounts
 
-`QUOTA_AXI_CLAUDE_SWAP=1` (or `true`) is an opt-in for people who run the third-party [claude-swap](https://github.com/realiti4/claude-swap) to hold several Claude accounts. Instead of reading Claude's own stores, quota-axi then runs claude-swap's non-interactive `cswap list --json` (fixed argv, resolved on `PATH`) and reports one lane per account it lists. Unset or any value other than `1` or `true`, Claude behaves exactly as it does without the variable and `cswap` never runs.
+`QUOTA_AXI_CLAUDE_SWAP=1` (or `true`) is an opt-in for people who run the third-party [claude-swap](https://github.com/realiti4/claude-swap) to hold several Claude accounts. Instead of reading Claude's own stores, quota-axi then runs claude-swap's non-interactive `cswap list --json` (fixed argv, resolved on `PATH`) and reports one lane per account it lists. Only the real executable is launched directly; a Windows `.cmd` or `.bat` launcher is reported as `claude_swap_unavailable` with `remedyCommand: pipx install claude-swap`, and can instead be replaced by the `cswap.exe` installed through uv. Unset or any value other than `1` or `true`, Claude behaves exactly as it does without the variable and `cswap` never runs.
 
 ```sh
 QUOTA_AXI_CLAUDE_SWAP=1 quota-axi --provider claude --json

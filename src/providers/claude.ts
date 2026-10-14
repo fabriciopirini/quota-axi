@@ -323,10 +323,8 @@ function claudeSwapQuota(account: ClaudeSwapAccount): ProviderQuota {
   };
   const usage = account.usageStatus === "ok" ? account.usage : undefined;
   if (usage && account.fetchedAt) {
-    const window = (raw: unknown) => {
-      const data = objectValue(raw);
-      return data && { utilization: data.pct, resets_at: data.resetsAt };
-    };
+    const window = (data: typeof usage.fiveHour) =>
+      data && { utilization: data.pct, resets_at: data.resetsAt };
     const reading = successProvider({
       provider: "claude",
       label: "Claude",

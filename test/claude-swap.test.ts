@@ -103,6 +103,20 @@ function oversizedCswap(done: string): void {
   chmodSync(file, 0o755);
 }
 
+function delayedCswap(done: string): void {
+  const file = join(home, "bin", "cswap");
+  mkdirSync(join(home, "bin"), { recursive: true });
+  writeFileSync(
+    file,
+    [
+      `#!${process.execPath}`,
+      `const { writeFileSync } = require("node:fs");`,
+      `setTimeout(() => process.stdout.write(${JSON.stringify(list())}, () => writeFileSync(${JSON.stringify(done)}, "done")), 100);`,
+    ].join("\n"),
+  );
+  chmodSync(file, 0o755);
+}
+
 async function waitForFile(file: string): Promise<void> {
   for (let attempt = 0; attempt < 200 && !existsSync(file); attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -272,7 +286,7 @@ describe.skipIf(process.platform === "win32")("claude-swap lanes", () => {
     expect(existsSync(ran)).toBe(false);
   });
 
-  it("keeps draining output after walking away from an oversized response", async () => {
+  it("rejects oversized completed output after letting cswap finish", async () => {
     const done = join(home, "cswap-finished");
     oversizedCswap(done);
     vi.stubEnv("QUOTA_AXI_CLAUDE_SWAP", "1");
@@ -282,6 +296,83 @@ describe.skipIf(process.platform === "win32")("claude-swap lanes", () => {
       "claude_swap_output_too_large",
     );
     await waitForFile(done);
+  });
+
+  it("walks away on timeout without closing the child's output", async () => {
+    const done = join(home, "cswap-finished-after-timeout");
+    delayedCswap(done);
+    vi.stubEnv("QUOTA_AXI_CLAUDE_SWAP", "1");
+    const realSetTimeout = globalThis.setTimeout;
+    const timer = vi
+      .spyOn(globalThis, "setTimeout")
+      .mockImplementation((handler, timeout, ...args) =>
+        realSetTimeout(handler, timeout === 30_000 ? 0 : timeout, ...args),
+      );
+
+    const report = await quota();
+    timer.mockRestore();
+    expect(report.providers[0].state.error).toBe("claude_swap_timed_out");
+    await waitForFile(done);
+  });
+
+  it.each([
+    ["a non-object row", [personal(), null]],
+    ["a missing email", [personal(), { ...team(), email: undefined }]],
+    [
+      "a missing organization UUID",
+      [personal(), { ...team(), organizationUuid: undefined }],
+    ],
+    [
+      "a non-string organization name",
+      [personal(), { ...team(), organizationName: 42 }],
+    ],
+    [
+      "a missing usage status",
+      [personal(), { ...team(), usageStatus: undefined }],
+    ],
+    ["a missing usage field", [personal(), { ...team(), usage: undefined }]],
+    ["a non-object usage", [personal(), { ...team(), usage: [] }]],
+    [
+      "an invalid fetched-at date",
+      [personal(), { ...team(), usageFetchedAt: "not-a-date" }],
+    ],
+    [
+      "a non-finite window percentage",
+      [
+        personal(),
+        {
+          ...team(),
+          usage: {
+            fiveHour: {
+              pct: "37",
+              resetsAt: "2026-10-14T16:30:00Z",
+            },
+          },
+        },
+      ],
+    ],
+    [
+      "an invalid reset date",
+      [
+        personal(),
+        {
+          ...team(),
+          usage: { fiveHour: { pct: 37, resetsAt: "not-a-date" } },
+        },
+      ],
+    ],
+    ["a repeated account key", [personal(), personal()]],
+  ])("rejects every account when one row has %s", async (_case, accounts) => {
+    cswap(list(accounts));
+    vi.stubEnv("QUOTA_AXI_CLAUDE_SWAP", "1");
+
+    const report = await quota();
+    expect(report.providers).toHaveLength(1);
+    expect(report.providers[0]).toMatchObject({
+      windows: [],
+      state: { status: "unavailable", error: "claude_swap_malformed" },
+    });
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it.each([

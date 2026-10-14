@@ -89,6 +89,24 @@ function cswap(stdout: string, code = 0): void {
   chmodSync(file, 0o755);
 }
 
+function environmentCheckingCswap(stdout: string): void {
+  const file = join(home, "bin", "cswap");
+  mkdirSync(join(home, "bin"), { recursive: true });
+  writeFileSync(
+    file,
+    [
+      "#!/bin/sh",
+      `[ "$*" = "list --json" ] || exit 64`,
+      `[ "$HOME" = '${home}' ] || exit 65`,
+      `[ -z "$CLAUDE_CODE_OAUTH_TOKEN" ] || exit 66`,
+      `[ -z "$ANTHROPIC_API_KEY" ] || exit 67`,
+      `[ -z "$QUOTA_AXI_UNRELATED" ] || exit 68`,
+      `printf '%s\\n' '${stdout}'`,
+    ].join("\n"),
+  );
+  chmodSync(file, 0o755);
+}
+
 function oversizedCswap(done: string): void {
   const file = join(home, "bin", "cswap");
   mkdirSync(join(home, "bin"), { recursive: true });
@@ -239,6 +257,22 @@ describe.skipIf(process.platform === "win32")("claude-swap lanes", () => {
       keys[1],
       keys[0],
     ]);
+  });
+
+  it("passes only the approved environment to cswap", async () => {
+    environmentCheckingCswap(list());
+    vi.stubEnv("QUOTA_AXI_CLAUDE_SWAP", "1");
+    vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", "secret-claude-token");
+    vi.stubEnv("ANTHROPIC_API_KEY", "secret-anthropic-key");
+    vi.stubEnv("QUOTA_AXI_UNRELATED", "not-for-the-child");
+
+    const report = await quota();
+    expect(report.providers).toHaveLength(2);
+    expect(report.providers.map(remaining)).toEqual([
+      ["five_hour=91", "seven_day=7"],
+      ["five_hour=63", "seven_day=59"],
+    ]);
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("reports an account without usable usage as its own unavailable lane", async () => {

@@ -19,6 +19,30 @@ const ARGS = ["list", "--json"] as const;
 /** claude-swap 0.26 bounds each usage fetch at 5s and a token refresh at 10s. */
 const WAIT_MS = 30_000;
 const OUTPUT_LIMIT_BYTES = 1_048_576;
+const CHILD_ENVIRONMENT_KEYS = new Set([
+  "HOME",
+  "PATH",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "LANG",
+  "LC_ALL",
+  "TERM",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_CACHE_HOME",
+]);
+const WINDOWS_CHILD_ENVIRONMENT_KEYS = new Set([
+  "SYSTEMROOT",
+  "USERPROFILE",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "PATHEXT",
+  "COMSPEC",
+]);
 
 type ClaudeSwapWindow = {
   pct: number;
@@ -96,9 +120,10 @@ export async function readClaudeSwapAccounts(): Promise<ClaudeSwapAccount[]> {
 async function runCswapList(): Promise<string> {
   const executable = await findCommandPath(COMMAND);
   if (!executable) throw new Error("claude_swap_unavailable");
+  const childEnvironment = claudeSwapEnvironment();
   let invocation: ReturnType<typeof commandInvocation>;
   try {
-    invocation = commandInvocation(executable, [...ARGS]);
+    invocation = commandInvocation(executable, [...ARGS], childEnvironment);
   } catch {
     throw new Error("claude_swap_spawn_failed");
   }
@@ -121,7 +146,7 @@ async function runCswapList(): Promise<string> {
     child = spawn(invocation.command, invocation.args, {
       stdio: ["ignore", outputFd, "ignore"],
       detached: true,
-      ...(invocation.environment ? { env: invocation.environment } : {}),
+      env: invocation.environment ?? childEnvironment,
     });
   } catch {
     closeSync(outputFd);
@@ -157,6 +182,23 @@ async function runCswapList(): Promise<string> {
       );
     });
   });
+}
+
+function claudeSwapEnvironment(): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {};
+  const windows = process.platform === "win32";
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value === undefined) continue;
+    const comparedKey = windows ? key.toUpperCase() : key;
+    if (
+      CHILD_ENVIRONMENT_KEYS.has(comparedKey) ||
+      comparedKey.startsWith("LC_") ||
+      (windows && WINDOWS_CHILD_ENVIRONMENT_KEYS.has(comparedKey))
+    ) {
+      environment[key] = value;
+    }
+  }
+  return environment;
 }
 
 async function readCompletedOutput(

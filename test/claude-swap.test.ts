@@ -1,0 +1,249 @@
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ProviderQuota } from "../src/types.js";
+
+/**
+ * Opt-in claude-swap lanes (`QUOTA_AXI_CLAUDE_SWAP`), exercised through the
+ * public command against a `cswap` stub on PATH that prints synthetic
+ * `cswap list --json` output, plus a stubbed Anthropic endpoint for the native
+ * lane. No real claude-swap, credential, or network is touched. The stubs are
+ * `#!/bin/sh` scripts, so Windows skips them.
+ */
+
+let home: string;
+let ran: string;
+const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+
+beforeEach(() => {
+  vi.resetModules();
+  home = mkdtempSync(join(tmpdir(), "quota-claude-swap-"));
+  ran = join(home, "cswap-ran");
+  vi.stubEnv("HOME", home);
+  vi.stubEnv("USERPROFILE", home);
+  vi.stubEnv("USER", "fixture-user");
+  vi.stubEnv("XDG_CACHE_HOME", join(home, "cache"));
+  vi.stubEnv("PATH", join(home, "bin"));
+  vi.stubEnv("CLAUDE_CONFIG_DIR", undefined);
+  vi.stubEnv("CLAUDE_SECURESTORAGE_CONFIG_DIR", undefined);
+  vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", undefined);
+  vi.stubEnv("QUOTA_AXI_CLAUDE_PROFILES", undefined);
+  vi.stubEnv("QUOTA_AXI_CLAUDE_SWAP", undefined);
+  Object.defineProperty(process, "platform", {
+    value: "linux",
+    configurable: true,
+  });
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime("2026-10-14T13:00:00.000Z");
+  // The native selected lane: one stored login answering 30% used
+  mkdirSync(join(home, ".claude"));
+  writeFileSync(
+    join(home, ".claude", ".credentials.json"),
+    JSON.stringify({ claudeAiOauth: { accessToken: "synthetic-native" } }),
+  );
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) =>
+      url.endsWith("/profile")
+        ? new Response("", { status: 404 })
+        : new Response(
+            JSON.stringify({
+              five_hour: { utilization: 30, resets_at: "2026-10-14T15:00:00Z" },
+            }),
+          ),
+    ),
+  );
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+  Object.defineProperty(process, "platform", platform);
+  process.exitCode = undefined;
+  rmSync(home, { recursive: true, force: true });
+});
+
+/** A `cswap` on PATH that records it ran, prints `stdout`, and exits `code`. */
+function cswap(stdout: string, code = 0): void {
+  const file = join(home, "bin", "cswap");
+  mkdirSync(join(home, "bin"), { recursive: true });
+  writeFileSync(
+    file,
+    [
+      "#!/bin/sh",
+      `[ "$*" = "list --json" ] || exit 64`,
+      `: > '${ran}'`,
+      `printf '%s\\n' '${stdout}'`,
+      `exit ${code}`,
+    ].join("\n"),
+  );
+  chmodSync(file, 0o755);
+}
+
+/** claude-swap's schema 1, shaped as observed from claude-swap 0.26. */
+function list(accounts: unknown[] = [personal(), team()]): string {
+  return JSON.stringify({ schemaVersion: 1, activeAccountNumber: 1, accounts });
+}
+
+function personal(): Record<string, unknown> {
+  return {
+    number: 1,
+    email: "personal@example.invalid",
+    organizationName: "Personal Org",
+    organizationUuid: "00000000-0000-4000-8000-000000000001",
+    active: true,
+    usageStatus: "ok",
+    usage: {
+      fiveHour: { pct: 9, resetsAt: "2026-10-14T18:00:00.431135+00:00" },
+      sevenDay: { pct: 93, resetsAt: "2026-10-15T17:00:00Z", expectedPct: 83 },
+    },
+    usageFetchedAt: "2026-10-14T12:58:00Z",
+  };
+}
+
+function team(): Record<string, unknown> {
+  return {
+    number: 2,
+    email: "team@example.invalid",
+    organizationName: "Team Org",
+    organizationUuid: "00000000-0000-4000-8000-000000000002",
+    active: false,
+    usageStatus: "ok",
+    usage: {
+      fiveHour: { pct: 37, resetsAt: "2026-10-14T16:30:00Z" },
+      sevenDay: { pct: 41, resetsAt: "2026-10-18T21:00:00Z" },
+      scoped: [{ pct: 12, resetsAt: "2026-10-18T21:00:00Z", name: "Fable" }],
+    },
+    usageFetchedAt: "2026-10-14T12:59:00Z",
+  };
+}
+
+type QuotaReport = { schemaVersion: number; providers: ProviderQuota[] };
+
+async function quota(args: string[] = ["--json"]): Promise<QuotaReport> {
+  // Imported per test: vi.resetModules lets each read see its stubbed env
+  const { quotaCommand } = await import("../src/commands.js");
+  return JSON.parse(
+    await quotaCommand(
+      ["--provider", "claude", "--no-credential-refresh", ...args],
+      undefined,
+    ),
+  ) as QuotaReport;
+}
+
+function remaining(provider: ProviderQuota): string[] {
+  return provider.windows.map((w) => `${w.id}=${w.percentRemaining}`);
+}
+
+/** The native selected lane, exactly as an unconfigured run reports it. */
+function expectNativeLane(report: QuotaReport): void {
+  expect(report.schemaVersion).toBe(5);
+  expect(report.providers.map((p) => [p.accountKey, remaining(p)])).toEqual([
+    [undefined, ["five_hour=70"]],
+  ]);
+}
+
+describe.skipIf(process.platform === "win32")("claude-swap lanes", () => {
+  it("never runs cswap without the opt-in", async () => {
+    cswap(list());
+    for (const value of [undefined, "", "0", "false", "yes"]) {
+      vi.stubEnv("QUOTA_AXI_CLAUDE_SWAP", value);
+      expectNativeLane(await quota());
+    }
+    expect(existsSync(ran)).toBe(false);
+  });
+
+  it("reports one attributed lane per account with used percent mapped to remaining", async () => {
+    cswap(list());
+    vi.stubEnv("QUOTA_AXI_CLAUDE_SWAP", "true");
+    // The claude-swap source takes precedence over profile lanes
+    vi.stubEnv("QUOTA_AXI_CLAUDE_PROFILES", join(home, ".claude"));
+
+    const report = await quota();
+    expect(report.schemaVersion).toBe(6);
+    expect(report.providers.map(remaining)).toEqual([
+      ["five_hour=91", "seven_day=7"],
+      ["five_hour=63", "seven_day=59", "model:fable=88"],
+    ]);
+    expect(report.providers[0].windows[0].resetsAt).toBe(
+      "2026-10-14T18:00:00.431135+00:00",
+    );
+    const keys = report.providers.map((p) => p.accountKey!);
+    for (const key of keys) expect(key).toMatch(/^claude-swap:[a-f0-9]{24}$/);
+    expect(new Set(keys).size).toBe(2);
+    expect(JSON.stringify(report)).not.toMatch(/example\.invalid|Org/);
+    // claude-swap measured the usage; quota-axi sent no vendor request
+    expect(fetch).not.toHaveBeenCalled();
+
+    const [first] = (await quota(["--full", "--json"])).providers;
+    expect(first).toMatchObject({
+      source: "cli",
+      attempts: [{ source: "claude-swap", status: "success" }],
+      account: {
+        email: "personal@example.invalid",
+        organization: "Personal Org",
+        identityStatus: "unverified",
+      },
+      state: { refreshedAt: "2026-10-14T12:58:00Z" },
+    });
+
+    // A slot renumbering in claude-swap does not move a lane's key
+    cswap(
+      list([
+        { ...team(), number: 1 },
+        { ...personal(), number: 2 },
+      ]),
+    );
+    expect((await quota()).providers.map((p) => p.accountKey)).toEqual([
+      keys[1],
+      keys[0],
+    ]);
+  });
+
+  it("reports an account without usable usage as its own unavailable lane", async () => {
+    cswap(
+      list([
+        { ...personal(), usageStatus: "relogin_required", usage: null },
+        // Every window's reset passed after claude-swap measured it
+        {
+          ...team(),
+          usage: { fiveHour: { pct: 37, resetsAt: "2026-10-14T12:30:00Z" } },
+        },
+      ]),
+    );
+    vi.stubEnv("QUOTA_AXI_CLAUDE_SWAP", "1");
+
+    const report = await quota();
+    expect(
+      report.providers.map((p) => [p.windows, p.state.status, p.state.error]),
+    ).toEqual([
+      [[], "unavailable", "claude_swap_relogin_required"],
+      [[], "unavailable", "claude_swap_usage_unavailable"],
+    ]);
+  });
+
+  it.each([
+    ["is not installed", undefined],
+    ["exits nonzero", () => cswap(list(), 1)],
+    ["prints malformed JSON", () => cswap("{not json")],
+    ["prints another schema", () => cswap('{"schemaVersion":2,"accounts":[]}')],
+    ["lists no account", () => cswap(list([]))],
+    ["lists no keyable account", () => cswap(list([{ usageStatus: "ok" }]))],
+  ])(
+    "falls back to the native selected lane when cswap %s",
+    async (_case, install) => {
+      install?.();
+      vi.stubEnv("QUOTA_AXI_CLAUDE_SWAP", "1");
+      expectNativeLane(await quota());
+    },
+  );
+});

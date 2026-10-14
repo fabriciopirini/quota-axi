@@ -30,6 +30,12 @@ import {
   discoverClaudeProfiles,
   type ClaudeProfile,
 } from "./claude-accounts.js";
+import {
+  CLAUDE_SWAP_SOURCE,
+  claudeSwapEnabled,
+  readClaudeSwapAccounts,
+  type ClaudeSwapAccount,
+} from "./claude-swap.js";
 import { execFileText } from "../lib/process.js";
 import { listRunningCommandLines } from "../lib/running-processes.js";
 import { redactSecret } from "../lib/secret.js";
@@ -206,8 +212,10 @@ type ClaudeLane = {
 const SELECTED_LANE: ClaudeLane = { envEligible: true };
 
 /**
- * Opt-in profile lanes from `QUOTA_AXI_CLAUDE_PROFILES`. Unset or blank, there
- * is nothing to discover and Claude keeps its single selected lane, unchanged.
+ * Opt-in lanes: one per claude-swap account under `QUOTA_AXI_CLAUDE_SWAP`,
+ * which takes precedence, else profile lanes from `QUOTA_AXI_CLAUDE_PROFILES`.
+ * Unset or blank, there is nothing to discover and Claude keeps its single
+ * selected lane, unchanged.
  *
  * Each lane reads only its own store. Only the process-selected lane consults
  * the environment token and may delegate a refresh; a sibling lane is
@@ -217,6 +225,26 @@ const SELECTED_LANE: ClaudeLane = { envEligible: true };
 async function discoverClaudeAccounts(): Promise<
   ProviderAccount[] | undefined
 > {
+  if (claudeSwapEnabled()) {
+    return (await readClaudeSwapAccounts()).map(
+      (account): ProviderAccount => ({
+        accountKey: account.accountKey,
+        fetchQuota: async () => claudeSwapQuota(account),
+        inspectAuth: async () => ({
+          provider: "claude",
+          sources: [
+            account.usageStatus === "ok"
+              ? { source: CLAUDE_SWAP_SOURCE, status: "available" }
+              : {
+                  source: CLAUDE_SWAP_SOURCE,
+                  status: "error",
+                  error: claudeSwapError(account),
+                },
+          ],
+        }),
+      }),
+    );
+  }
   const listed = claudeListedProfiles();
   if (!listed) return undefined;
   const darwin = process.platform === "darwin";
@@ -265,6 +293,83 @@ async function discoverClaudeAccounts(): Promise<
         ),
     };
   });
+}
+
+/**
+ * One claude-swap account's reading. `pct` is claude-swap's copy of the
+ * Anthropic usage endpoint's `utilization` (and a scoped limit's `percent`),
+ * so it maps through the same normalizers as a native read. claude-swap
+ * measured it at `usageFetchedAt`, so a window whose reset has passed since
+ * is dropped like a stale one. No identity is verified here, so a lane never
+ * coalesces with another.
+ */
+function claudeSwapQuota(account: ClaudeSwapAccount): ProviderQuota {
+  const identity: ClaudeAccount = {
+    email: account.email,
+    organization: account.organization,
+    identityStatus: "unverified",
+  };
+  const usage = account.usageStatus === "ok" ? account.usage : undefined;
+  if (usage && account.fetchedAt) {
+    const window = (raw: unknown) => {
+      const data = objectValue(raw);
+      return data && { utilization: data.pct, resets_at: data.resetsAt };
+    };
+    const scoped = Array.isArray(usage.scoped) ? usage.scoped : [];
+    const reading = successProvider({
+      provider: "claude",
+      label: "Claude",
+      source: "cli",
+      account: identity,
+      windows: [
+        normalizeWindow(
+          window(usage.fiveHour),
+          "five_hour",
+          "session",
+          "session",
+        ),
+        normalizeWindow(window(usage.sevenDay), "seven_day", "week", "weekly"),
+        ...scoped.map((raw) => {
+          const data = objectValue(raw);
+          const name = stringValue(data?.name);
+          return (
+            name &&
+            normalizeScopedLimitEntry({
+              percent: data?.pct,
+              resets_at: data?.resetsAt,
+              scope: { model: { display_name: name } },
+            })
+          );
+        }),
+      ].filter((window): window is QuotaWindow => Boolean(window)),
+      refreshedAt: account.fetchedAt,
+      sourcesTried: [CLAUDE_SWAP_SOURCE],
+      attempts: [{ source: CLAUDE_SWAP_SOURCE, status: "success" }],
+    });
+    const windows = servableStaleWindows(reading, Date.now());
+    if (windows.length > 0) return { ...reading, windows };
+  }
+  const error = claudeSwapError(account);
+  return {
+    ...failedProvider({
+      provider: "claude",
+      label: "Claude",
+      status: "unavailable",
+      error,
+      sourcesTried: [CLAUDE_SWAP_SOURCE],
+      attempts: [{ source: CLAUDE_SWAP_SOURCE, status: "failed", error }],
+    }),
+    account: identity,
+  };
+}
+
+/** claude-swap's own `usageStatus`, or `usage_unavailable` for an unusable `ok`. */
+function claudeSwapError(account: ClaudeSwapAccount): string {
+  const status =
+    account.usageStatus !== "ok" && /^[a-z_]{1,40}$/.test(account.usageStatus)
+      ? account.usageStatus
+      : "usage_unavailable";
+  return `claude_swap_${status}`;
 }
 
 /**

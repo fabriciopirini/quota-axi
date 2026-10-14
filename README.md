@@ -440,7 +440,7 @@ QUOTA_AXI_SNAPSHOT=test/fixtures/quota.json quota-axi --json
 
 The reporting unit is the verified underlying subscription, not each credential route that can read it.
 A normal invocation reports every Codex ChatGPT subscription it can discover from sibling entries in one Pi `auth.json`.
-Claude reports more than its one selected profile only when `QUOTA_AXI_CLAUDE_PROFILES` opts in ([Claude profiles](#claude-profiles)).
+Claude reports more than its one selected profile only when `QUOTA_AXI_CLAUDE_PROFILES` ([Claude profiles](#claude-profiles)) or `QUOTA_AXI_CLAUDE_SWAP` ([claude-swap accounts](#claude-swap-accounts)) opts in.
 It keeps each account's quota windows, resets, plan, effective availability, runway, and `spendPriority` separate.
 Each account gets its own TUI card, naming its key on an `account <key>` line under the card title, including accounts whose quota cannot be read.
 The `default` key an expanded report fills in for single-account providers is a schema artefact, so the TUI leaves it out of both the card and the `--full` footer; TOON and JSON still publish it.
@@ -497,6 +497,24 @@ QUOTA_AXI_CLAUDE_PROFILES="$HOME/.claude-work:$HOME/.claude-team" quota-axi --pr
 - The `--tui` report can name each lane by its config directory with `tui.accountLabels` ([Human terminal report](#human-terminal-report---tui)); agent output keeps only the account key.
 - `--profile-only` ignores the variable and keeps reading exactly one file.
 
+### claude-swap accounts
+
+`QUOTA_AXI_CLAUDE_SWAP=1` (or `true`) is an opt-in for people who run the third-party [claude-swap](https://github.com/realiti4/claude-swap) to hold several Claude accounts. Instead of reading Claude's own stores, quota-axi then runs claude-swap's non-interactive `cswap list --json` (fixed argv, resolved on `PATH`) and reports one lane per account it lists. Unset or any value other than `1` or `true`, Claude behaves exactly as it does without the variable and `cswap` never runs.
+
+```sh
+QUOTA_AXI_CLAUDE_SWAP=1 quota-axi --provider claude --json
+QUOTA_AXI_CLAUDE_SWAP=1 quota-axi --provider claude --full --json  # adds source attempts and claude-swap's account labels
+```
+
+- quota-axi takes no credential or token from claude-swap: it reads only the account labels and usage that command prints, and sends no request of its own for these lanes. The command is claude-swap's own; it may fetch usage from Anthropic and renew credentials it manages under its own polling policy, which `--no-credential-refresh` does not reach. quota-axi waits up to 30 seconds and then walks away without signalling it, like a [delegated refresh](#delegated-credential-refresh).
+- It reads claude-swap's JSON schema 1 (verified against claude-swap 0.26). Per account: `email` and `organizationUuid` key the lane, `organizationName` is a label, `usageStatus` says whether `usage` is usable, and `usageFetchedAt` is when claude-swap measured it. `usage.fiveHour.pct`, `usage.sevenDay.pct`, and each `usage.scoped[].pct` are claude-swap's copies of the Anthropic usage endpoint's `utilization` and scoped-limit `percent`, which are percent used, so they map through the native Claude normalizer to `five_hour`, `seven_day`, and `model:<slug>` windows (for example `model:fable`) with the same trusted durations. `resetsAt` passes through. Nothing else is read: `active`, `number`, `alias`, `spend`, and claude-swap's pace and projection fields are not published.
+- Each lane's key is `claude-swap:` plus 24 hexadecimal characters of a one-way digest of the account's email and organization UUID, so it survives slot renumbering and contains no email. Lanes keep claude-swap's order, which carries no preference.
+- A lane's `refreshedAt` is claude-swap's `usageFetchedAt`, and a window whose reset has passed since then is dropped. An account whose `usageStatus` is not `ok`, or that has no window left, is its own `unavailable` lane with `state.error: claude_swap_<usageStatus>` (or `claude_swap_usage_unavailable`) rather than disappearing; quota-axi does not treat claude-swap's status as a sign-out.
+- `--full` reports `source: cli` with a `claude-swap` attempt, and `account` with claude-swap's `email` and `organizationName` marked `identityStatus: unverified`. With no verified account id, lanes never coalesce: two seats are never combined.
+- These lanes are not cached and never served stale; claude-swap keeps its own last-good usage. `auth` lists one `claude-swap` source per account from the same command.
+- When `cswap` is missing, exits nonzero, outruns the wait, or prints anything but schema 1 with at least one account carrying an email, Claude falls back to its one selected lane, as when unset.
+- The variable takes precedence over `QUOTA_AXI_CLAUDE_PROFILES`, and `--profile-only` ignores it.
+
 ### Same subscription across sources
 
 After a provider's lanes have been read, collection coalesces readings that share a provider-supported subscription identity.
@@ -523,7 +541,7 @@ A row covering one credential lists just its own key. A consumer that holds a cr
 A provider without account discovery lists `accountKeys: ["default"]`, the same literal as its schema 6 `accountKey` filler. A discovering provider that stays on one row, such as two Pi keys for one account with no native login, keeps schema 5 and no `accountKey`, and its `accountKeys` starts with that lane's key.
 Membership mirrors quota-axi's own grouping exactly: every key the provider grouped into the row, and no other. That grouping relies on stored account identity when no fresh live reading confirms it, so a fold is published as applied even when a later live reading names a different account.
 `accountKeys` is a quota JSON field. Auth still lists each discovered lane on its own, because a fold that depends on the quota reading has not happened there. TOON does not add a column: its flat blocks already name the published lane by `accountKey`, and the membership list is the JSON account row's join field.
-The shared account collector puts each discovered lane's key first; an adapter adds folded keys to its quota reading's `ProviderQuota.accountKeys`, including keys learned during the read. Codex and, when `QUOTA_AXI_CLAUDE_PROFILES` opts in, Claude are the adapters that discover accounts today; other providers report `default`. The list itself is not cached; Codex reconstructs a stale row's originating key from the cached credential source.
+The shared account collector puts each discovered lane's key first; an adapter adds folded keys to its quota reading's `ProviderQuota.accountKeys`, including keys learned during the read. Codex and, when `QUOTA_AXI_CLAUDE_PROFILES` or `QUOTA_AXI_CLAUDE_SWAP` opts in, Claude are the adapters that discover accounts today; other providers report `default`. The list itself is not cached; Codex reconstructs a stale row's originating key from the cached credential source.
 Every flat TOON block adds `accountKey` immediately after `provider`, and the quota/exhaustion/attention join becomes **`provider` + `accountKey` + `scope`**.
 Models and model sort ties use **`provider` + `accountKey` + `id`**.
 Models `unmatchedWindowIds` entries gain the same key, so an unmapped window reads `provider/accountKey/scope` instead of `provider/scope`; the key keeps two accounts of one provider from reporting the same unmapped window indistinguishably.
@@ -543,7 +561,7 @@ Consumers must honor the schema version; a legacy keyless row means the single s
 
 Account collection is shared in `src/providers/accounts.ts`.
 Adapters can implement `ProviderAdapter.discoverAccounts` with stable keys and bound quota/auth readers; collection preserves each account's success or failure.
-Codex Pi sibling entries are the first discovery implementation on this tree, and opt-in Claude profiles the second. An adapter may also name each lane's local selector as `ProviderAccount.locator`; the collector publishes it as `accountLocator` on an expanded lane's row, in `--full` only.
+Codex Pi sibling entries are the first discovery implementation on this tree, opt-in Claude profiles the second, and opt-in claude-swap accounts the third. An adapter may also name each lane's local selector as `ProviderAccount.locator`; the collector publishes it as `accountLocator` on an expanded lane's row, in `--full` only.
 Other adapters retain their existing source-selection behavior.
 
 ## Output Model
@@ -1140,7 +1158,7 @@ Providers with no established non-interactive rotation command stay read-only on
 - It never prints, logs, or caches credential values.
 - It never mints, rotates, or writes a credential, and never performs a refresh-token exchange. Credential renewal is always delegated to the vendor CLI that owns the store (see [Delegated credential refresh](#delegated-credential-refresh)). Muse is the one provider whose only quota read, the Muse CLI's own startup request, also returns an API key; that read is verified to return the account's standing key rather than mint a fresh one, quota-axi discards the key while parsing, never stores or prints it, and bounds how often it sends the request (see [Muse provider notes](#provider-notes)).
 - It never retains, prints, logs, renders, caches, sends, or exchanges a refresh token's value. The Pi credential brokers read a stored refresh value only to derive a usability boolean - whether it is a usable literal secret rather than absent or an environment, template, or command reference - and discard it immediately; elsewhere only its presence is checked, as evidence that the vendor can still recover.
-- It never launches the Cursor, GitHub (`gh`), Copilot, Pi, Kimi, MiniMax, OpenCode, Command Code, ElevenLabs, Devin, or Muse CLIs. It runs the read-only Alibaba `bl` usage command, the read-only Higgsfield `account status` / `account transactions` / `generate list` commands, the declared read-only Codex app-server probe, Antigravity's noninteractive structured `/quota` read (`agy -p "/quota"`), preferred ahead of its loopback access, and the two declared refresh delegates (`claude doctor`, `grok models`); none starts an agent session or spends the quota being measured. The one explicit exception is `--allow-claude-inference`, whose fixed native Claude request spends inference quota and is documented above.
+- It never launches the Cursor, GitHub (`gh`), Copilot, Pi, Kimi, MiniMax, OpenCode, Command Code, ElevenLabs, Devin, or Muse CLIs. It runs the read-only Alibaba `bl` usage command, the read-only Higgsfield `account status` / `account transactions` / `generate list` commands, the declared read-only Codex app-server probe, Antigravity's noninteractive structured `/quota` read (`agy -p "/quota"`), preferred ahead of its loopback access, claude-swap's `cswap list --json` only under the `QUOTA_AXI_CLAUDE_SWAP` opt-in ([claude-swap accounts](#claude-swap-accounts)), and the two declared refresh delegates (`claude doctor`, `grok models`); none starts an agent session or spends the quota being measured. The one explicit exception is `--allow-claude-inference`, whose fixed native Claude request spends inference quota and is documented above.
 - It never signals or kills a delegated refresh. A vendor that outruns quota-axi's wait is left to finish its own token exchange, and quota-axi reports an unconfirmed refresh instead of a credential verdict.
 - It never routes, ranks a winner, or orders providers preferentially. Derived comparative signals, including `effectiveAvailability[].selection`, are published as data for the consumer to act on.
 

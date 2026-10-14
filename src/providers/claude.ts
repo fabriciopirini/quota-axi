@@ -225,9 +225,7 @@ const SELECTED_LANE: ClaudeLane = { envEligible: true };
 async function discoverClaudeAccounts(
   options: ProviderOptions,
   operation: "quota" | "auth",
-): Promise<
-  ProviderAccount[] | undefined
-> {
+): Promise<ProviderAccount[] | undefined> {
   if (claudeSwapEnabled()) {
     if (operation === "auth") return undefined;
     if (!options.refreshCredentials)

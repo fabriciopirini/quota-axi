@@ -168,10 +168,7 @@ async function quota(args: string[] = ["--json"]): Promise<QuotaReport> {
   // Imported per test: vi.resetModules lets each read see its stubbed env
   const { quotaCommand } = await import("../src/commands.js");
   return JSON.parse(
-    await quotaCommand(
-      ["--provider", "claude", ...args],
-      undefined,
-    ),
+    await quotaCommand(["--provider", "claude", ...args], undefined),
   ) as QuotaReport;
 }
 
@@ -274,7 +271,9 @@ describe.skipIf(process.platform === "win32")("claude-swap lanes", () => {
     const auth = JSON.parse(
       await authCommand(["--provider", "claude", "--json"], undefined),
     ) as { auth: Array<{ sources: Array<{ source: string }> }> };
-    expect(auth.auth[0].sources.some((source) => source.source === "claude-swap")).toBe(false);
+    expect(
+      auth.auth[0].sources.some((source) => source.source === "claude-swap"),
+    ).toBe(false);
     expect(existsSync(ran)).toBe(false);
 
     const report = await quota(["--no-credential-refresh", "--json"]);
@@ -378,10 +377,22 @@ describe.skipIf(process.platform === "win32")("claude-swap lanes", () => {
   it.each([
     ["is not installed", undefined, "claude_swap_unavailable"],
     ["exits nonzero", () => cswap(list(), 1), "claude_swap_exit_status"],
-    ["prints malformed JSON", () => cswap("{not json"), "claude_swap_malformed"],
-    ["prints another schema", () => cswap('{"schemaVersion":2,"accounts":[]}'), "claude_swap_malformed"],
+    [
+      "prints malformed JSON",
+      () => cswap("{not json"),
+      "claude_swap_malformed",
+    ],
+    [
+      "prints another schema",
+      () => cswap('{"schemaVersion":2,"accounts":[]}'),
+      "claude_swap_malformed",
+    ],
     ["lists no account", () => cswap(list([])), "claude_swap_malformed"],
-    ["lists no keyable account", () => cswap(list([{ usageStatus: "ok" }])), "claude_swap_malformed"],
+    [
+      "lists no keyable account",
+      () => cswap(list([{ usageStatus: "ok" }])),
+      "claude_swap_malformed",
+    ],
   ])(
     "reports unavailable without native fallback when cswap %s",
     async (_case, install, error) => {

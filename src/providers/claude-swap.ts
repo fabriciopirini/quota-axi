@@ -48,7 +48,7 @@ const WINDOWS_CHILD_ENVIRONMENT_KEYS = new Set([
 
 type ClaudeSwapWindow = {
   pct: number;
-  resetsAt: string;
+  resetsAt?: string;
 };
 
 type ClaudeSwapUsage = {
@@ -272,9 +272,15 @@ function optionalWindow(
 ): ClaudeSwapWindow | undefined {
   if (!Object.hasOwn(usage, key)) return undefined;
   const value = objectValue(usage[key]);
-  if (!value || !Number.isFinite(value.pct) || !validDate(value.resetsAt))
+  const resetsAt = value?.resetsAt ?? undefined;
+  if (
+    !value ||
+    !Number.isFinite(value.pct) ||
+    (resetsAt !== undefined && !validDate(resetsAt))
+  )
     throw new Error("claude_swap_malformed");
-  return { pct: value.pct as number, resetsAt: value.resetsAt as string };
+  // An idle window has no reset; a native read keeps it the same way
+  return { pct: value.pct as number, resetsAt: resetsAt as string | undefined };
 }
 
 function objectValue(value: unknown): Record<string, unknown> | undefined {

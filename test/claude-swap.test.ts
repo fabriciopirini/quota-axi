@@ -328,6 +328,24 @@ describe.skipIf(process.platform === "win32")("claude-swap lanes", () => {
     ]);
   });
 
+  it("keeps an idle window that claude-swap reports without a reset", async () => {
+    cswap(
+      list([
+        {
+          ...personal(),
+          usage: { ...personal().usage, fiveHour: { pct: 0 } },
+        },
+      ]),
+    );
+    vi.stubEnv("QUOTA_AXI_CLAUDE_SWAP", "1");
+
+    const report = await quota();
+    expect(report.providers.map(remaining)).toEqual([
+      ["five_hour=100", "seven_day=7"],
+    ]);
+    expect(report.providers[0].windows[0].resetsAt).toBeUndefined();
+  });
+
   it("does not run cswap for auth or refresh-disabled quota", async () => {
     cswap(list());
     vi.stubEnv("QUOTA_AXI_CLAUDE_SWAP", "1");

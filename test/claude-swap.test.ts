@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -143,6 +144,22 @@ async function waitForFile(file: string): Promise<void> {
   expect(existsSync(file)).toBe(true);
 }
 
+async function waitForNoSwapOutput(directory: string): Promise<void> {
+  for (
+    let attempt = 0;
+    attempt < 200 &&
+    readdirSync(directory).some((name) => name.startsWith("quota-axi-cswap-"));
+    attempt += 1
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  expect(
+    readdirSync(directory).filter((name) =>
+      name.startsWith("quota-axi-cswap-"),
+    ),
+  ).toEqual([]);
+}
+
 /** claude-swap's schema 1, shaped as observed from claude-swap 0.26. */
 function list(accounts: unknown[] = [personal(), team()]): string {
   return JSON.stringify({ schemaVersion: 1, activeAccountNumber: 1, accounts });
@@ -260,6 +277,19 @@ describe.skipIf(process.platform === "win32")("claude-swap lanes", () => {
     ]);
   });
 
+  it("ignores an invalid profile list when claude-swap owns the quota read", async () => {
+    cswap(list());
+    vi.stubEnv("QUOTA_AXI_CLAUDE_SWAP", "1");
+    vi.stubEnv("QUOTA_AXI_CLAUDE_PROFILES", "relative-work");
+
+    const report = await quota();
+    expect(report.providers.map(remaining)).toEqual([
+      ["five_hour=91", "seven_day=7"],
+      ["five_hour=63", "seven_day=59"],
+    ]);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("passes only the approved environment to cswap", async () => {
     environmentCheckingCswap(list());
     vi.stubEnv("QUOTA_AXI_CLAUDE_SWAP", "1");
@@ -334,6 +364,9 @@ describe.skipIf(process.platform === "win32")("claude-swap lanes", () => {
 
   it("walks away on timeout without closing the child's output", async () => {
     const done = join(home, "cswap-finished-after-timeout");
+    const outputRoot = join(home, "tmp");
+    mkdirSync(outputRoot);
+    vi.stubEnv("TMPDIR", outputRoot);
     delayedCswap(done);
     vi.stubEnv("QUOTA_AXI_CLAUDE_SWAP", "1");
     const realSetTimeout = globalThis.setTimeout;
@@ -347,6 +380,7 @@ describe.skipIf(process.platform === "win32")("claude-swap lanes", () => {
     timer.mockRestore();
     expect(report.providers[0].state.error).toBe("claude_swap_timed_out");
     await waitForFile(done);
+    await waitForNoSwapOutput(outputRoot);
   });
 
   it.each([

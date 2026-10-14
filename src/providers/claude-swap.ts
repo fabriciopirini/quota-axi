@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, openSync } from "node:fs";
+import { closeSync, openSync, rmSync } from "node:fs";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
@@ -20,6 +20,7 @@ const ARGS = ["list", "--json"] as const;
 const WAIT_MS = 30_000;
 const OUTPUT_LIMIT_BYTES = 1_048_576;
 export const CLAUDE_SWAP_EXECUTABLE_REMEDY = "pipx install claude-swap";
+const pendingOutputDirectories = new Set<string>();
 const CHILD_ENVIRONMENT_KEYS = new Set([
   "HOME",
   "PATH",
@@ -132,6 +133,7 @@ async function runCswapList(): Promise<string> {
   let outputDirectory: string;
   try {
     outputDirectory = await mkdtemp(join(tmpdir(), "quota-axi-cswap-"));
+    trackOutput(outputDirectory);
   } catch {
     throw new Error("claude_swap_unavailable");
   }
@@ -158,6 +160,12 @@ async function runCswapList(): Promise<string> {
   closeSync(outputFd);
   return new Promise((resolve, reject) => {
     let settled = false;
+    let cleanupStarted = false;
+    const cleanupAfterWalkAway = () => {
+      if (cleanupStarted) return;
+      cleanupStarted = true;
+      void removeOutput(outputDirectory);
+    };
     const walkAway = (error: string) => {
       if (settled) return;
       settled = true;
@@ -167,7 +175,10 @@ async function runCswapList(): Promise<string> {
     };
     const timer = setTimeout(() => walkAway("claude_swap_timed_out"), WAIT_MS);
     child.on("error", () => {
-      if (settled) return;
+      if (settled) {
+        cleanupAfterWalkAway();
+        return;
+      }
       settled = true;
       clearTimeout(timer);
       void removeOutput(outputDirectory).then(() =>
@@ -175,7 +186,10 @@ async function runCswapList(): Promise<string> {
       );
     });
     child.on("close", (code) => {
-      if (settled) return;
+      if (settled) {
+        cleanupAfterWalkAway();
+        return;
+      }
       settled = true;
       clearTimeout(timer);
       void readCompletedOutput(outputPath, outputDirectory, code).then(
@@ -222,6 +236,22 @@ async function removeOutput(outputDirectory: string): Promise<void> {
   await rm(outputDirectory, { recursive: true, force: true }).catch(
     () => undefined,
   );
+  pendingOutputDirectories.delete(outputDirectory);
+  if (pendingOutputDirectories.size === 0)
+    process.off("exit", removePendingOutputsSync);
+}
+
+function trackOutput(outputDirectory: string): void {
+  if (pendingOutputDirectories.size === 0)
+    process.once("exit", removePendingOutputsSync);
+  pendingOutputDirectories.add(outputDirectory);
+}
+
+function removePendingOutputsSync(): void {
+  for (const outputDirectory of pendingOutputDirectories) {
+    rmSync(outputDirectory, { recursive: true, force: true });
+  }
+  pendingOutputDirectories.clear();
 }
 
 function parseUsage(value: unknown): ClaudeSwapUsage | undefined {

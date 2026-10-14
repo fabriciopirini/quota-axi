@@ -224,11 +224,11 @@ const SELECTED_LANE: ClaudeLane = { envEligible: true };
  * marker or `--allow-keychain-prompt` as today.
  */
 async function discoverClaudeAccounts(
-  options: ProviderOptions,
-  operation: "quota" | "auth",
+  options?: ProviderOptions,
+  operation?: "quota" | "auth",
 ): Promise<ProviderAccount[] | undefined> {
   if (claudeSwapEnabled()) {
-    if (operation === "auth") return undefined;
+    if (!options || operation !== "quota") return undefined;
     if (!options.refreshCredentials)
       return [claudeSwapUnavailableAccount("claude_swap_refresh_disabled")];
     let accounts: ClaudeSwapAccount[];
